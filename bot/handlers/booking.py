@@ -303,6 +303,15 @@ async def on_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer('Бронь создана ✓')
 
+    # Гасим кнопки подтверждения на прошлом сообщении — иначе «залипают».
+    try:
+        await callback.message.edit_text(
+            f"Бронь {booking_id} создана. Меню оплаты — ниже.",
+            reply_markup=None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     runtime.remember_chat(booking_id, callback.message.chat.id)
     runtime.payments.start_hold(booking)
 

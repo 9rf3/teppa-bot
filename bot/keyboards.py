@@ -81,7 +81,7 @@ def seat_grid(
     taken: set[int],
     blocked: set[int],
     per_row: int = 6,
-    max_rows: int = 8,
+    max_rows: int = 14,
 ) -> InlineKeyboardMarkup:
     """Схема автобуса: занятые и заблокированные места — «призраки»."""
     rows: list[list[InlineKeyboardButton]] = []

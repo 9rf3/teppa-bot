@@ -122,10 +122,16 @@ class Supabase:
         digits = ''.join(ch for ch in phone if ch.isdigit())
         if not digits:
             return []
+        # Фильтруем на стороне БД по последним 9 цифрам (форматы записи разные),
+        # затем в Python добиваемся строгого совпадения окончания.
         rows = await self._request(
             'GET',
             '/bookings',
-            params={'order': 'created_at.desc', 'limit': '20'},
+            params={
+                'phone': f'ilike.%{digits[-9:]}%',
+                'order': 'created_at.desc',
+                'limit': '50',
+            },
         )
         found = [
             row
