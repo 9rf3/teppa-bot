@@ -1,16 +1,22 @@
-"""HTTP-сервер вебхуков: Payme Merchant API и Click SHOP API.
+"""HTTP-сервер вебхуков: Telegram, Payme Merchant API и Click SHOP API.
 
-Отвечает ВСЕГДА HTTP 200 — иначе Payme считает ответ RPC-ошибкой -32400.
+Отвечает Payme/Click ВСЕГДА HTTP 200 — иначе Payme считает ответ RPC-ошибкой -32400.
 Логика разбора запросов живёт в bot.payments.*; здесь только транспорт.
+
+Эндпоинт /telegram/webhook работает только в режиме вебхука (TELEGRAM_WEBHOOK_URL
+или RENDER_EXTERNAL_URL заданы) и защищён заголовком X-Telegram-Bot-Api-Secret-Token.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import secrets
 from typing import Any
 from urllib.parse import parse_qsl
 
+from aiogram.types import Update
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -20,17 +26,44 @@ from .payments import payme as payme_api
 log = logging.getLogger('teppa.server')
 
 
-def create_app(service: Any, settings: Any, db: Any) -> FastAPI:
+def create_app(service: Any, settings: Any, db: Any,
+               dispatcher: Any = None, bot: Any = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get('/health')
     async def health() -> dict[str, Any]:
         return {
             'ok': True,
+            'mode': 'webhook' if settings.webhook_mode else 'polling',
             'payme': settings.payme_ready,
             'click': settings.click_ready,
             'card': settings.card_ready,
         }
+
+    if settings.webhook_mode and dispatcher is not None and bot is not None:
+        @app.post('/telegram/webhook')
+        async def telegram_webhook(request: Request) -> JSONResponse:
+            expected = settings.telegram_webhook_secret
+            if not expected:
+                # Без секрета не принимаем ничего: наружу могут писать только Telegram.
+                return JSONResponse({'ok': False, 'error': 'webhook secret is not configured'},
+                                    status_code=503)
+            got = request.headers.get('x-telegram-bot-api-secret-token', '')
+            if not secrets.compare_digest(got, expected):
+                return JSONResponse({'ok': False, 'error': 'bad secret'}, status_code=403)
+            try:
+                update = Update.model_validate_json(await request.body())
+            except Exception:  # noqa: BLE001 — это не апдейт Telegram
+                return JSONResponse({'ok': False, 'error': 'bad update'}, status_code=400)
+
+            try:
+                # Отвечаем после обработки: Telegram повторяет доставку только при не-2xx.
+                await asyncio.wait_for(dispatcher.feed_update(bot=bot, update=update), timeout=25)
+            except asyncio.TimeoutError:
+                log.warning('telegram webhook: обработка дольше 25 с — отвечаем 200')
+            except Exception:
+                log.exception('telegram webhook: ошибка обработки update %s', update.update_id)
+            return JSONResponse({'ok': True})
 
     @app.post('/payme/webhook')
     async def payme_webhook(request: Request) -> JSONResponse:

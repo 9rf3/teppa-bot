@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
@@ -44,8 +45,17 @@ class Settings:
     service_fee: int = 990
     lunch_price: int = 100_000
 
+    # Режим вебхука (Render и другой публичный хостинг):
+    # пусто — локальный polling; задан — Telegram шлёт апдейты на <url>/telegram/webhook.
+    telegram_webhook_url: str = ''
+    telegram_webhook_secret: str = ''
+
     host: str = '0.0.0.0'
     port: int = 8080
+
+    @property
+    def webhook_mode(self) -> bool:
+        return bool(self.telegram_webhook_url)
 
     # Запасной способ связать платёж с чатом, если процесс перезапустили.
     extra: dict[str, str] = field(default_factory=dict)
@@ -84,6 +94,17 @@ def load_settings() -> Settings:
             'Не заданы обязательные переменные: ' + ', '.join(missing) + '. Скопируйте .env.example в .env и заполните.'
         )
 
+    # Режим вебхука: на Render адрес подставляется автоматически (RENDER_EXTERNAL_URL).
+    webhook_url = (
+        os.getenv('TELEGRAM_WEBHOOK_URL', '').strip().rstrip('/')
+        or os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+    )
+    webhook_secret = os.getenv('TELEGRAM_WEBHOOK_SECRET', '').strip()
+    if webhook_url and not webhook_secret:
+        # Секрет обязателен: иначе /telegram/webhook принимал бы апдейты от кого угодно.
+        # Генерируется на каждый запуск — при старте он заново уходит в setWebhook.
+        webhook_secret = secrets.token_urlsafe(32)
+
     return Settings(
         bot_token=token,
         bot_username=os.getenv('BOT_USERNAME', '').strip().lstrip('@'),
@@ -104,4 +125,6 @@ def load_settings() -> Settings:
         lunch_price=int(os.getenv('LUNCH_PRICE', '100000') or 100_000),
         host=os.getenv('HOST', '0.0.0.0').strip() or '0.0.0.0',
         port=int(os.getenv('PORT', '8080') or 8080),
+        telegram_webhook_url=webhook_url,
+        telegram_webhook_secret=webhook_secret,
     )

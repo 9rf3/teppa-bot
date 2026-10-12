@@ -1,0 +1,33 @@
+# TEPPA bot → Render.com (Blueprint).
+# Подключается один раз: Render → New → Blueprint → репозиторий 9rf3/teppa-bot.
+#
+# Секреты здесь НАМЕРЕННО нет — они добавляются в дашборде Render →
+# сервис → Environment: BOT_TOKEN, ADMIN_IDS, SUPABASE_URL,
+# SUPABASE_SERVICE_ROLE_KEY, опционально PAYME_* / CLICK_* / CARD_*.
+services:
+  - type: web
+    name: teppa-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Render сам подставляет PORT (10000) и RENDER_EXTERNAL_URL (публичный адрес);
+      # из него бот вычисляет свой вебхук https://<имя>.onrender.com/telegram/webhook.
+      - key: HOST
+        value: 0.0.0.0
+      - key: SITE_URL
+        value: https://teppa.vercel.app
+      - key: BOT_USERNAME
+        value: teppa_pay_bot
+      - key: PAYME_TEST
+        value: "true"
+      - key: HOLD_MINUTES
+        value: "12"
+      - key: SERVICE_FEE
+        value: "990"
+      - key: LUNCH_PRICE
+        value: "100000"

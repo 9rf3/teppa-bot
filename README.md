@@ -29,7 +29,9 @@ Telegram-бот TEPPA на Python (aiogram 3): бронирование мест
 
 ```
 teppa-bot/
-├── main.py                 # запуск: polling бота + uvicorn с вебхуками
+├── main.py                 # запуск: polling (локально) или вебхук (Render) + uvicorn
+├── render.yaml             # Blueprint для Render.com — деплой одной кнопкой
+├── .python-version         # 3.12 — версия Python и локально, и на Render
 ├── requirements.txt
 ├── .env.example            # все переменные с комментариями
 ├── bot/
@@ -45,9 +47,11 @@ teppa-bot/
 │   │   ├── click.py        # SHOP API: Prepare/Complete, MD5-подпись
 │   │   └── service.py      # удержание, отметка «оплачено», доставка билета
 │   ├── handlers/           # start / trips / booking / payment / admin
-│   └── server.py           # FastAPI: /health, /payme/webhook, /click/webhook
+│   └── server.py           # FastAPI: /health, /telegram, /payme, /click webhook
 └── tests/
-    └── test_signatures.py  # подписи, суммы, токен QR, RPC-сценарий Payme
+    ├── test_signatures.py  # подписи, суммы, токен QR, RPC-сценарий Payme
+    ├── test_flows.py       # 16 шагов: /start → бронь → чек → билет с QR
+    └── test_webhook.py     # вебхук Telegram: секрет, приём апдейта, ответы
 ```
 
 ## Установка
@@ -74,6 +78,8 @@ cp .env.example .env       # и заполните
 | `HOLD_MINUTES` | окно удержания (по умолчанию `12`, как на сайте) |
 | `SERVICE_FEE`, `LUNCH_PRICE` | 990 и 100000 — должны совпадать с сайтом |
 | `HOST`, `PORT` | адрес HTTP-сервера вебхуков |
+| `TELEGRAM_WEBHOOK_URL` | пусто = polling; задано = апдейты приходят POST'ом на `<url>/telegram/webhook`. На Render подставляется автоматически из `RENDER_EXTERNAL_URL` |
+| `TELEGRAM_WEBHOOK_SECRET` | секрет заголовка `X-Telegram-Bot-Api-Secret-Token`; если пусто — генерируется при старте |
 
 Провайдер считается «готовым», только если заполнены **все** его ключи —
 иначе кнопка способа оплаты просто не показывается (та же логика, что на сайте).
@@ -86,8 +92,9 @@ cp .env.example .env       # и заполните
 
 В одном процессе поднимаются:
 
-* long-polling Telegram-бота;
-* HTTP-сервер вебхуков на `0.0.0.0:8080` (`GET /health` — проверка живости).
+* приём апдейтов Telegram: **long-polling** локально или **вебхук**, если задан
+  `TELEGRAM_WEBHOOK_URL` (режим видно в `GET /health` → `mode`);
+* HTTP-сервер вебхуков (`GET /health` — проверка живости).
 
 ### Как указать Payme и Click адреса вебхуков
 
@@ -99,6 +106,54 @@ cp .env.example .env       # и заполните
 | Click | Сервис → «URL Prepare/Complete» (Merchant API) | `https://<домен>/click/webhook` |
 
 После регистрации проверьте: `curl https://<домен>/health` → `{"ok":true,…}`.
+
+## Деплой на Render.com
+
+В репозитории лежит `render.yaml` — Blueprint собирает `pip install -r
+requirements.txt` и запускает `python main.py`, версия Python берётся из
+`.python-version`.
+
+1. [render.com](https://dashboard.render.com) → **New → Blueprint** → подключить
+   репозиторий `github.com/9rf3/teppa-bot` → **Apply**.
+2. Дашборд → сервис → **Environment** → добавить секреты (в `render.yaml` их
+   нет намеренно) и **Save**:
+
+   | Переменная | Где взять |
+   |---|---|
+   | `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) |
+   | `ADMIN_IDS` | Telegram ID админов через запятую |
+   | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | тот же проект, что у сайта |
+   | `PAYME_*`, `CLICK_*`, `CARD_*` | если есть; иначе пропустите — кнопка скроется |
+
+   Затем **Manual Deploy → Clear build cache & deploy**.
+3. Готово: `https://<имя-сервиса>.onrender.com/health` →
+   `{"ok":true,"mode":"webhook",…}`.
+
+Что настроено само:
+
+* `PORT` (по умолчанию `10000`) и `RENDER_EXTERNAL_URL` подставляет Render; из
+  второго бот вычисляет свой адрес и вызывает
+  `setWebhook(https://<имя>.onrender.com/telegram/webhook)`.
+* Эндпоинт защищён заголовком `X-Telegram-Bot-Api-Secret-Token`
+  (`TELEGRAM_WEBHOOK_SECRET`; если не задан — генерируется при каждом старте,
+  и так же заново уходит в `setWebhook`).
+* `autoDeploy: true` — пуш в `main` сразу пересобирает сервис.
+
+Мелочи, о которых надо знать:
+
+* **Одновременно только один экземпляр.** Локальный `python main.py` при старте
+  делает `deleteWebhook` — это выключит бота на Render (и наоборот: polling на
+  Render невозможен, Telegram ответит 409). Перед деплоем остановите локального
+  бота.
+* **Бесплатный тариф** засыпает после 15 минут без входящих запросов и просыпается
+  около минуты (Telegram повторит доставку — сообщение не теряется). Чтобы ответ
+  был мгновенным всегда: тариф Starter или внешний cron, пингующий `GET /health`
+  раз в 10 минут.
+* После деплоя станут публичными адреса для кабинетов платёжек:
+  `https://<имя>.onrender.com/payme/webhook` и `.../click/webhook`.
+* Локально webhook-режим проверяется без Telegram:
+  `TELEGRAM_WEBHOOK_URL=http://localhost:8080 TELEGRAM_WEBHOOK_SECRET=xxx .venv/bin/python main.py`
+  (адрес без https — `setWebhook` пропускается, но `/telegram/webhook` работает).
 
 ## Оплата
 
@@ -142,6 +197,7 @@ https://t.me/<BOT_USERNAME>?start=pay_<bookingId>
 ```bash
 .venv/bin/python tests/test_signatures.py     # подписи Payme/Click, суммы, QR-токен
 .venv/bin/python tests/test_flows.py          # 16 шагов: /start → бронь → чек → билет с QR
+.venv/bin/python tests/test_webhook.py        # вебхук Telegram: секрет, приём апдейта
 # или: .venv/bin/pytest tests/
 ```
 
