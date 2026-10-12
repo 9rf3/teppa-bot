@@ -159,3 +159,4 @@ https://t.me/<BOT_USERNAME>?start=pay_<bookingId>
 | `payments` | одна строка на бронь, `provider ∈ payme\|click\|card`, `amount` в сумах |
 | удалённые рейсы | `date + time` в прошлом не показываются |
 | «Мои брони» | поиск по телефону (на сайте — по email; в форме бота email тоже спрашивается) |
+# teppa-bot
