@@ -140,12 +140,14 @@ https://t.me/<BOT_USERNAME>?start=pay_<bookingId>
 ## Тесты
 
 ```bash
-.venv/bin/python tests/test_signatures.py     # или: .venv/bin/pytest tests/
+.venv/bin/python tests/test_signatures.py     # подписи Payme/Click, суммы, QR-токен
+.venv/bin/python tests/test_flows.py          # 16 шагов: /start → бронь → чек → билет с QR
+# или: .venv/bin/pytest tests/
 ```
 
-Проверяются без сети и без базы: подписи Click, Basic-авторизация Payme,
-генерация checkout-ссылки, полный RPC-сценарий (суммы, идемпотентность),
-формат QR-токена и таймер удержания.
+`test_flows.py` гоняет настоящие апдейты через Dispatcher: сессия Telegram и база —
+заглушки, поэтому тест ловит ошибки вроде `command.payload` (в aiogram 3 есть только
+`command.args`), из-за которых бот молчит. Проверяется без сети и без базы.
 
 ## Совместимость с сайтом
 

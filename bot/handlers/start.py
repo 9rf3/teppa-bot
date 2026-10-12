@@ -28,7 +28,8 @@ class Mine(StatesGroup):
 @router.message(CommandStart())
 async def on_start(message: Message, state: FSMContext, command: CommandObject) -> None:
     await state.clear()
-    payload = (command.payload or '').strip()
+    # aiogram 3: содержимое после /start лежит в command.args, а не в payload.
+    payload = (command.args or '').strip()
 
     if payload.startswith('pay_'):
         # Ссылка с сайта: «Оплатить в Telegram-боте» → /start pay_<bookingId>
