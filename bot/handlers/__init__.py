@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram import Dispatcher
 
-from . import admin, booking, payment, start, trips
+from . import admin, booking, group, payment, start, trips
 
 
 def register_all(dp: Dispatcher) -> None:
@@ -15,3 +15,5 @@ def register_all(dp: Dispatcher) -> None:
     dp.include_router(booking.router)
     dp.include_router(payment.router)
     dp.include_router(admin.router)
+    # group последним — просто логирует ID чата, где появился бот.
+    dp.include_router(group.router)
