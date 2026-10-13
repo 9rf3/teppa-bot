@@ -19,6 +19,12 @@ def _int_tuple(raw: str) -> tuple[int, ...]:
     return tuple(out)
 
 
+def _int_or_none(raw: str) -> int | None:
+    """'-1001234567890' -> -1001234567890; пусто/мусор -> None."""
+    raw = raw.strip()
+    return int(raw) if raw.lstrip('-').isdigit() else None
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -40,6 +46,22 @@ class Settings:
 
     card_number: str = ''
     card_holder: str = ''
+
+    # Группа Telegram, куда бот пересылает чеки (супергруппа, бот — участник).
+    # Пусто → старый путь: чек каждому админу в ЛС.
+    admin_group_id: int | None = None
+
+    # Доступ сайта к /internal/* (подтверждение/отклонение чека из админки).
+    internal_secret: str = ''
+    # Через сколько секунд чек принимается автоматически, если никто не отклонил.
+    receipt_seconds: int = 120
+
+    # SMTP для писем покупателю при отклонении. Пусто → письмо не шлётся.
+    smtp_host: str = ''
+    smtp_port: int = 587
+    smtp_user: str = ''
+    smtp_pass: str = ''
+    smtp_from: str = ''
 
     hold_minutes: int = 12
     service_fee: int = 990
@@ -71,6 +93,10 @@ class Settings:
     @property
     def card_ready(self) -> bool:
         return bool(self.card_number)
+
+    @property
+    def smtp_ready(self) -> bool:
+        return bool(self.smtp_host and self.smtp_port)
 
 
 def load_settings() -> Settings:
@@ -120,6 +146,14 @@ def load_settings() -> Settings:
         click_secret_key=os.getenv('CLICK_SECRET_KEY', '').strip(),
         card_number=os.getenv('CARD_NUMBER', '').strip(),
         card_holder=os.getenv('CARD_HOLDER', '').strip() or 'TEPPA',
+        admin_group_id=_int_or_none(os.getenv('ADMIN_GROUP_ID', '')),
+        internal_secret=os.getenv('INTERNAL_SECRET', '').strip(),
+        receipt_seconds=int(os.getenv('RECEIPT_CHECK_SECONDS', '120') or 120),
+        smtp_host=os.getenv('SMTP_HOST', '').strip(),
+        smtp_port=int(os.getenv('SMTP_PORT', '587') or 587),
+        smtp_user=os.getenv('SMTP_USER', '').strip(),
+        smtp_pass=os.getenv('SMTP_PASS', '').strip(),
+        smtp_from=os.getenv('SMTP_FROM', '').strip() or os.getenv('SMTP_USER', '').strip(),
         hold_minutes=int(os.getenv('HOLD_MINUTES', '12') or 12),
         service_fee=int(os.getenv('SERVICE_FEE', '990') or 990),
         lunch_price=int(os.getenv('LUNCH_PRICE', '100000') or 100_000),

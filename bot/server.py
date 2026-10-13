@@ -97,7 +97,59 @@ def create_app(service: Any, settings: Any, db: Any,
         )
         return JSONResponse(content=result, status_code=200)
 
+    # ---------- Внутренние вызовы админки сайта ----------
+
+    def _internal_status(request: Request) -> int:
+        """200 — ок; 503 — секрет не задан; 403 — секрет не совпал."""
+        if not settings.internal_secret:
+            return 503
+        got = request.headers.get('x-internal-secret', '')
+        return 200 if secrets.compare_digest(got, settings.internal_secret) else 403
+
+    def _internal_reply(status: int, detail: str) -> JSONResponse:
+        return JSONResponse({'ok': False, 'error': detail}, status_code=status)
+
+    @app.post('/internal/approve')
+    async def internal_approve(request: Request) -> JSONResponse:
+        status = _internal_status(request)
+        if status != 200:
+            return _internal_reply(status, 'forbidden' if status == 403 else 'not configured')
+        body = await _json(request)
+        booking_id = str(body.get('booking_id') or '')
+        if not booking_id:
+            return _internal_reply(400, 'booking_id is required')
+        try:
+            ok = await service.approve_card(booking_id)
+        except Exception:  # noqa: BLE001
+            log.exception('internal/approve: ошибка брони %s', booking_id)
+            return _internal_reply(502, 'db error')
+        return JSONResponse({'ok': bool(ok)})
+
+    @app.post('/internal/reject')
+    async def internal_reject(request: Request) -> JSONResponse:
+        status = _internal_status(request)
+        if status != 200:
+            return _internal_reply(status, 'forbidden' if status == 403 else 'not configured')
+        body = await _json(request)
+        booking_id = str(body.get('booking_id') or '')
+        if not booking_id:
+            return _internal_reply(400, 'booking_id is required')
+        try:
+            await service.reject_payment(booking_id, str(body.get('reason') or ''))
+        except Exception:  # noqa: BLE001
+            log.exception('internal/reject: ошибка брони %s', booking_id)
+            return _internal_reply(502, 'db error')
+        return JSONResponse({'ok': True})
+
     return app
+
+
+async def _json(request: Request) -> dict[str, Any]:
+    try:
+        data = await request.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 async def _form(request: Request) -> dict[str, str]:

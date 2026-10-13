@@ -13,7 +13,16 @@ from typing import Any
 from .. import keyboards, notify, runtime, texts
 from ..config import Settings
 from ..db import Supabase, SupabaseError
-from ..utils import create_qr_token, hold_deadline, hold_left, mmss, money
+from ..utils import (
+    create_qr_token,
+    hold_deadline,
+    hold_left,
+    mmss,
+    money,
+    parse_tg_post,
+    seconds_since,
+    tg_post_link,
+)
 
 log = logging.getLogger('teppa.payments')
 
@@ -22,6 +31,8 @@ class PaymentService:
     def __init__(self, db: Supabase, settings: Settings):
         self.db = db
         self.settings = settings
+        # booking_id -> задача авто-подтверждения чека (через receipt_seconds).
+        self._receipts: dict[str, asyncio.Task] = {}
 
     # ---------- Удержание места ----------
 
@@ -140,7 +151,7 @@ class PaymentService:
             except SupabaseError:
                 log.exception('не удалось загрузить рейс %s', booking.get('trip_id'))
 
-            chat_id = runtime.chat_for(booking_id)
+            chat_id = await self._buyer_chat(booking_id)
             if chat_id and runtime.bot:
                 await notify.send_ticket(runtime.bot, chat_id, booking, trip)
 
@@ -181,35 +192,208 @@ class PaymentService:
         )
         runtime.remember_chat(str(booking['id']), chat_id)
 
-    async def approve_card(self, booking_id: str) -> bool:
+    async def _buyer_chat(self, booking_id: str) -> int | None:
+        """Чат покупателя: память процесса, потом payments.external_id ('tg:<id>')."""
+        chat_id = runtime.chat_for(booking_id)
+        if chat_id:
+            return chat_id
+        try:
+            payment = await self.db.payment(booking_id)
+        except SupabaseError:
+            payment = None
+        external = str((payment or {}).get('external_id') or '')
+        if external.startswith('tg:'):
+            try:
+                chat_id = int(external.split(':', 1)[1])
+            except ValueError:
+                chat_id = None
+        if chat_id:
+            runtime.remember_chat(booking_id, chat_id)
+        return chat_id
+
+    async def approve_card(self, booking_id: str, *, auto: bool = False) -> bool:
+        """Оплата подтверждена (вручную или автоматически через 2 минуты) — билет уходит."""
         payment = await self.db.payment(booking_id)
         external = str((payment or {}).get('external_id') or '')
         ok = await self.mark_paid(
             booking_id,
             provider='card',
             external_id=external or None,
-            note='Подтверждено администратором',
+            note='Оплачено автоматически по чеку' if auto else 'Подтверждено администратором',
         )
         if ok:
             await notify.notify_user(booking_id, texts.PAID_BADGE)
+            await self._edit_receipt_post(
+                payment,
+                texts.RECEIPT_POST_AUTO_OK if auto else texts.RECEIPT_POST_OK,
+            )
         return ok
 
-    async def reject_card(self, booking_id: str) -> None:
+    async def reject_payment(self, booking_id: str, reason: str = '') -> None:
+        """Чек отклонён: снимаем бронь (место снова в продаже) и оповещаем покупателя.
+
+        Работает и до авто-подтверждения, и после — билет перестаёт действовать,
+        потому что проверка QR смотрит на статус брони.
+        """
+        note = reason or 'Чек не подтверждён'
+        booking = await self.db.booking(booking_id)
         payment = await self.db.payment(booking_id)
-        if payment and payment.get('status') == 'pending':
+
+        if booking and booking.get('status') != 'Отменена':
+            try:
+                await self.db.set_booking_status(booking_id, 'Отменена')
+            except SupabaseError:
+                log.exception('не удалось снять бронь %s', booking_id)
+
+        if payment and payment.get('status') != 'cancelled':
             await self.db.save_payment(
                 booking_id=booking_id,
-                provider='card',
+                provider=str(payment.get('provider') or 'card'),
                 amount=int(payment.get('amount') or 0),
                 status='cancelled',
                 error_code='rejected',
-                error_note='Чек отклонён администратором',
+                error_note=note,
             )
-        await notify.notify_user(
-            booking_id,
-            'Чек не подтверждён. Пришлите корректный скриншот или выберите другой способ оплаты.',
-            keyboards.back_to_booking(booking_id),
+
+        self.cancel_receipt_check(booking_id)
+        runtime.cancel_hold_task(booking_id)
+
+        await notify.notify_user(booking_id, texts.PAY_REJECTED, keyboards.main_menu())
+
+        email = str((booking or {}).get('email') or '').strip()
+        if email and self.settings.smtp_ready:
+            await asyncio.to_thread(
+                notify.send_email,
+                email,
+                texts.EMAIL_REJECT_SUBJECT,
+                texts.EMAIL_REJECT_BODY.format(booking=booking_id),
+            )
+
+        await self._edit_receipt_post(payment, texts.RECEIPT_POST_REJECTED.format(reason=note))
+        await notify.notify_admins(
+            f'❌ Бронь {booking_id} отклонена — {note}. Место снова свободно.'
         )
+
+    # ---------- Чек: пересылка в группу и авто-подтверждение ----------
+
+    async def register_receipt(self, booking_id: str, file_id: str, chat_id: int) -> str:
+        """Скриншот получен: фото в группу админов, ссылка на пост в payments, таймер.
+
+        Возвращает ссылку на пост в группе ('' — группа не настроена, чек ушёл в ЛС).
+        """
+        booking = await self.db.booking(booking_id)
+        booking = booking or {}
+        passenger = f"{booking.get('first_name') or ''} {booking.get('last_name') or ''}".strip()
+        caption = texts.RECEIPT_GROUP_CAPTION.format(
+            booking=booking_id,
+            title=booking.get('trip_title') or booking.get('direction') or 'Поездка',
+            seat=booking.get('seat') or '—',
+            amount=money(int(booking.get('price') or 0)),
+            passenger=passenger or '—',
+            phone=booking.get('phone') or '—',
+        )
+        link = await self._post_receipt(file_id, caption, keyboards.receipt_actions(booking_id))
+
+        runtime.remember_chat(booking_id, chat_id)
+        await self.db.save_payment(
+            booking_id=booking_id,
+            provider='card',
+            amount=int(booking.get('price') or 0),
+            status='pending',
+            external_id=f'tg:{chat_id}',
+            error_code='receipt',
+            error_note=link or 'Чек у администратора',
+        )
+        self.schedule_receipt_check(booking_id)
+        return link
+
+    async def _post_receipt(self, file_id: str, caption: str, markup) -> str:
+        """Фото чека → группа админов; если не вышло — в ЛС админам. Ссылка на пост."""
+        bot = runtime.bot
+        group = self.settings.admin_group_id
+        if bot and group:
+            try:
+                message = await bot.send_photo(group, file_id, caption=caption, reply_markup=markup)
+                return tg_post_link(group, message.message_id)
+            except Exception:  # noqa: BLE001
+                log.exception('чек не ушёл в группу %s — отправляем админам в ЛС', group)
+        if bot:
+            for admin_id in self.settings.admin_ids:
+                try:
+                    await bot.send_photo(admin_id, file_id, caption=caption, reply_markup=markup)
+                except Exception:  # noqa: BLE001
+                    log.exception('чек не переслался админу %s', admin_id)
+        return ''
+
+    def schedule_receipt_check(self, booking_id: str, delay: float | None = None) -> None:
+        """Через delay секунд (по умолчанию receipt_seconds) чек принимается сам."""
+        if delay is None:
+            delay = float(self.settings.receipt_seconds)
+        old = self._receipts.pop(booking_id, None)
+        if old and not old.done():
+            old.cancel()
+        self._receipts[booking_id] = asyncio.create_task(self._receipt_watch(booking_id, delay))
+
+    def cancel_receipt_check(self, booking_id: str) -> None:
+        task = self._receipts.pop(booking_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def stop(self) -> None:
+        """Гасит таймеры чеков при выключении процесса."""
+        for task in self._receipts.values():
+            if not task.done():
+                task.cancel()
+        self._receipts.clear()
+
+    async def _receipt_watch(self, booking_id: str, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self.auto_accept_receipt(booking_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception('авто-подтверждение чека не отработало: %s', booking_id)
+
+    async def auto_accept_receipt(self, booking_id: str) -> bool:
+        """Прошло 2 минуты и никто не отклонил — принимаем оплату, шлём билет."""
+        payment = await self.db.payment(booking_id)
+        if not payment or payment.get('status') != 'pending' \
+                or payment.get('error_code') != 'receipt':
+            return False
+        booking = await self.db.booking(booking_id)
+        if not booking or booking.get('status') != 'Новая':
+            return False
+        return await self.approve_card(booking_id, auto=True)
+
+    async def resume_receipt_checks(self) -> None:
+        """После рестарта: дожидаемся остатка таймера, просроченные — сразу принимаем."""
+        try:
+            payments = await self.db.pending_receipts()
+        except SupabaseError:
+            log.exception('не удалось возобновить проверку чеков')
+            return
+        for payment in payments:
+            booking_id = str(payment.get('booking_id') or '')
+            if not booking_id:
+                continue
+            waited = seconds_since(str(payment.get('updated_at') or payment.get('created_at') or ''))
+            self.schedule_receipt_check(booking_id, max(0.0, self.settings.receipt_seconds - waited))
+
+    async def _edit_receipt_post(self, payment: dict[str, Any] | None, title: str) -> None:
+        """Итог проверки на посте с чеком: правим подпись, гасим кнопки."""
+        link = str((payment or {}).get('error_note') or '')
+        ref = parse_tg_post(link)
+        bot = runtime.bot
+        if not ref or not bot:
+            return
+        try:
+            await bot.edit_message_caption(
+                chat_id=ref[0], message_id=ref[1], caption=title, reply_markup=None,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception('не удалось обновить пост чека %s', link)
 
     # ---------- Проверка ----------
 
@@ -237,7 +421,7 @@ class PaymentService:
         return 'unpaid', booking
 
     async def _deliver_ticket(self, booking: dict[str, Any]) -> None:
-        chat_id = runtime.chat_for(str(booking['id']))
+        chat_id = await self._buyer_chat(str(booking['id']))
         if not chat_id or not runtime.bot:
             return
         trip = None

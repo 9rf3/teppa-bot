@@ -110,7 +110,8 @@ async def on_admin_callback(callback: CallbackQuery) -> None:
         booking_id = parts[2]
         await callback.answer()
         try:
-            await runtime.payments.reject_card(booking_id)
+            # Снимает бронь (место снова в продаже), пишет покупателю и на пост чека.
+            await runtime.payments.reject_payment(booking_id)
         except SupabaseError:
             await callback.answer('База недоступна', show_alert=True)
             return

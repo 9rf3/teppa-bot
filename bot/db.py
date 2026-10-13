@@ -191,6 +191,23 @@ class Supabase:
         )
         return rows or []
 
+    async def pending_receipts(self) -> list[dict[str, Any]]:
+        """Чеки, ждущие проверки: перевод на карту, скриншот уже пришёл.
+
+        Признак полученного чека — error_code='receipt' (его ставит register_receipt).
+        """
+        rows = await self._request(
+            'GET',
+            '/payments',
+            params={
+                'provider': 'eq.card',
+                'status': 'eq.pending',
+                'error_code': 'eq.receipt',
+                'order': 'created_at.asc',
+            },
+        )
+        return rows or []
+
     async def save_payment(
         self,
         *,

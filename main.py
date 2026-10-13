@@ -61,6 +61,9 @@ async def main() -> int:
         if not server.started:
             raise RuntimeError(f'HTTP-сервер не поднялся на {settings.host}:{settings.port}')
 
+        # Чеки, пришедшие до рестарта: дожидаемся остатка 2 минут или принимаем сразу.
+        await service.resume_receipt_checks()
+
         if settings.webhook_mode:
             # Режим Render: Telegram сам присылает апдейты на /telegram/webhook,
             # polling не нужен (и конфликтовал бы с вебхуком: getUpdates → 409).

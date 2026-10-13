@@ -60,6 +60,8 @@ def set_hold_task(booking_id: str, task: asyncio.Task) -> None:
 
 async def shutdown() -> None:
     """Корректно закрываем HTTP-клиент Supabase при остановке."""
+    if payments is not None and hasattr(payments, 'stop'):
+        payments.stop()  # гасим таймеры авто-подтверждения чеков
     for task in list(_holds.values()):
         if not task.done():
             task.cancel()

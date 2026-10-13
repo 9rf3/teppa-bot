@@ -100,6 +100,34 @@ def hold_left(deadline: datetime, now: datetime | None = None) -> timedelta:
     return deadline - now
 
 
+def tg_post_link(chat_id: int, message_id: int) -> str:
+    """Ссылка на пост в супергруппе: https://t.me/c/<id>/<msg>. Для ЛС — пусто."""
+    raw = str(chat_id)
+    return f'https://t.me/c/{raw[4:]}/{message_id}' if raw.startswith('-100') else ''
+
+
+def parse_tg_post(link: str) -> tuple[int, int] | None:
+    """'https://t.me/c/123456/789' -> (-100123456, 789); не разобралось — None."""
+    parts = (link or '').strip().rstrip('/').split('/')
+    try:
+        if len(parts) >= 3 and parts[-3] == 'c':
+            return int('-100' + parts[-2]), int(parts[-1])
+    except ValueError:
+        return None
+    return None
+
+
+def seconds_since(iso: str) -> float:
+    """Сколько секунд прошло с ISO-момента (плохое значение → 0)."""
+    try:
+        moment = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+    except ValueError:
+        return 0.0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
+
+
 def mmss(delta: timedelta) -> str:
     """'07:58' — для таймера; меньше нуля не уходит."""
     total = max(0, int(delta.total_seconds()))

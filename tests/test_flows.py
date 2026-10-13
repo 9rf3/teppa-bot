@@ -164,6 +164,11 @@ class FakeDb:
         return [dict(p) for p in self.payments.values()
                 if p['provider'] == 'card' and p['status'] == 'pending']
 
+    async def pending_receipts(self):
+        return [dict(p) for p in self.payments.values()
+                if p['provider'] == 'card' and p['status'] == 'pending'
+                and p.get('error_code') == 'receipt']
+
     async def save_payment(self, *, booking_id, provider, amount, status,
                            external_id=None, prepare_id=None, error_code=None, error_note=None):
         base = self.payments.get(booking_id, {'created_at': datetime.now(timezone.utc).isoformat()})
@@ -323,8 +328,8 @@ async def run() -> None:
         await send(callback_update(f"pay:{booking['id']}:card"), 'Пришлите сюда скриншот чека')
         assert db.payments[booking['id']]['status'] == 'pending', db.payments
 
-        # 12. чек ушёл админу
-        await send(photo_update(), 'Чек отправлен администратору')
+        # 12. чек ушёл админу (группа не настроена — ЛС), покупатель ждёт ~2 минуты
+        await send(photo_update(), 'Чек получен')
         admin_photo = [m for m in bot.session.sent if type(m).__name__ == 'SendPhoto'
                        and getattr(m, 'chat_id', None) == USER_ID]
         assert admin_photo and 'Чек' in (admin_photo[-1].caption or ''), 'чек админу не ушёл'

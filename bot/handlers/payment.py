@@ -215,27 +215,16 @@ async def on_receipt(message: Message, state: FSMContext) -> None:
         return
 
     file_id = message.photo[-1].file_id
+    # Отвечаем сразу: дальше чек уходит в группу админов и стартует таймер проверки.
     await message.answer(texts.PAY_CARD_WAITING, reply_markup=keyboards.main_menu())
 
     try:
-        booking = await runtime.db.booking(booking_id)
+        await runtime.payments.register_receipt(booking_id, file_id, message.chat.id)
     except SupabaseError:
-        booking = None
-    caption = (
-        f'🧾 Чек {booking_id}\n'
-        f"{(booking or {}).get('trip_title', '')} · место №{(booking or {}).get('seat', '—')}\n"
-        f"Сумма: {money(int((booking or {}).get('price') or 0))}\n"
-        'Подтвердите или отклоните оплату:'
-    )
-    kb = keyboards.receipt_actions(booking_id)
-    settings = runtime.settings
-    for admin_id in (settings.admin_ids if settings else ()):
-        try:
-            await message.bot.send_photo(admin_id, file_id, caption=caption, reply_markup=kb)
-        except Exception:  # noqa: BLE001
-            log.exception('чек не переслался админу %s', admin_id)
-            await notify.notify_admins(caption, reply_markup=kb)
-            break
+        log.exception('чек не сохранился: %s', booking_id)
+        await notify.notify_admins(
+            f'🧾 Чек по брони {booking_id} — фото не переслалось, проверьте вручную.'
+        )
 
 
 @router.message(Card.receipt, F.text)
