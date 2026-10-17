@@ -1,0 +1,20 @@
+# TEPPA bot → HTTPS. Домен подставляется из переменной BOT_DOMAIN (.env).
+#
+# Все POST-маршруты уходят в контейнер бота:
+#   /health          — проверка живости
+#   /telegram/webhook — апдейты Telegram (секрет X-Telegram-Bot-Api-Secret-Token)
+#   /payme/webhook   — Payme Merchant API
+#   /click/webhook   — Click SHOP API
+#   /internal/*      — админка сайта (заголовок X-Internal-Secret)
+{$BOT_DOMAIN} {
+	encode zstd gzip
+
+	# Обработка чека может занять до 25 с — таймауты не ограничиваем.
+	reverse_proxy bot:8080
+
+	# Access-лог в stdout → docker compose logs -f caddy
+	log {
+		output stdout
+		format console
+	}
+}

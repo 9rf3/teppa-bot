@@ -1,0 +1,64 @@
+# TEPPA bot → VPS (Datapasa). Полная инструкция: DEPLOY.md
+#
+#   1. cp .env.example .env   — заполнить секреты и BOT_DOMAIN
+#   2. docker compose up -d --build
+#
+# Требуется BOT_DOMAIN в .env (A-запись домена на IP VPS): по нему Caddy
+# выпустит Let's Encrypt-сертификат и на https://$BOT_DOMAIN придут апдейты
+# Telegram (TELEGRAM_WEBHOOK_URL подставляется здесь автоматически).
+services:
+  bot:
+    build:
+      context: .
+    image: teppa-bot:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      # Webhook-режим: Telegram шлёт апдейты на этот адрес (нужен HTTPS).
+      TELEGRAM_WEBHOOK_URL: https://${BOT_DOMAIN:?Укажите BOT_DOMAIN в .env — A-запись домена на IP VPS}
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # HTTPS-терминал: сам выпуска и продлевает сертификат Let's Encrypt.
+  # Порты 80/443 должны быть открыты (в панели Datapasa и в ufw).
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      BOT_DOMAIN: ${BOT_DOMAIN:?Укажите BOT_DOMAIN в .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data     # сертификаты Let's Encrypt
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

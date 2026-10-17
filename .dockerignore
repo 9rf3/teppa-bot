@@ -1,0 +1,19 @@
+# Не тащим в образ: секреты, виртуальное окружение, историю git, тесты.
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.DS_Store
+.env
+.env.example
+tests
+render.yaml
+deploy
+docker-compose.yml
+Dockerfile
+.dockerignore
+README.md
+DEPLOY.md

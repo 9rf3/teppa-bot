@@ -29,9 +29,14 @@ Telegram-бот TEPPA на Python (aiogram 3): бронирование мест
 
 ```
 teppa-bot/
-├── main.py                 # запуск: polling (локально) или вебхук (Render) + uvicorn
-├── render.yaml             # Blueprint для Render.com — деплой одной кнопкой
-├── .python-version         # 3.12 — версия Python и локально, и на Render
+├── main.py                 # запуск: polling (локально) или вебхук (VPS/Render) + uvicorn
+├── Dockerfile              # образ для VPS (python:3.12-slim, непривилегированный юзер)
+├── docker-compose.yml      # бот + Caddy (HTTPS) — деплой на VPS одной командой
+├── deploy/Caddyfile        # reverse proxy: домен → bot:8080, сертификат Let's Encrypt
+├── scripts/deploy.sh       # обновление на VPS: git pull + docker compose up -d --build
+├── DEPLOY.md               # полная инструкция деплоя на VPS (Datapasa)
+├── render.yaml             # Blueprint для Render.com — альтернативный деплой
+├── .python-version         # 3.12 — версия Python локально, в образе и на Render
 ├── requirements.txt
 ├── .env.example            # все переменные с комментариями
 ├── bot/
@@ -82,16 +87,26 @@ cp .env.example .env       # и заполните
 | `HOLD_MINUTES` | окно удержания (по умолчанию `12`, как на сайте) |
 | `SERVICE_FEE`, `LUNCH_PRICE` | 990 и 100000 — должны совпадать с сайтом |
 | `HOST`, `PORT` | адрес HTTP-сервера вебхуков |
-| `TELEGRAM_WEBHOOK_URL` | пусто = polling; задано = апдейты приходят POST'ом на `<url>/telegram/webhook`. На Render подставляется автоматически из `RENDER_EXTERNAL_URL` |
-| `TELEGRAM_WEBHOOK_SECRET` | секрет заголовка `X-Telegram-Bot-Api-Secret-Token`; если пусто — генерируется при старте |
+| `TELEGRAM_WEBHOOK_URL` | пусто = polling; задано = апдейты приходят POST'ом на `<url>/telegram/webhook`. На VPS подставляется из `BOT_DOMAIN` в `docker-compose.yml`, на Render — из `RENDER_EXTERNAL_URL`; руками задавать не нужно |
+| `TELEGRAM_WEBHOOK_SECRET` | секрет заголовка `X-Telegram-Bot-Api-Secret-Token`; если пусто — генерируется при старте (на VPS лучше задать: `openssl rand -hex 16`) |
+| `BOT_DOMAIN` | домен VPS без `https://` (например `bot.example.uz`) — нужен Caddy и webhook-режиму в compose |
 
 Провайдер считается «готовым», только если заполнены **все** его ключи —
 иначе кнопка способа оплаты просто не показывается (та же логика, что на сайте).
 
 ## Запуск
 
+Локально (polling, без вебхуков Telegram):
+
 ```bash
 .venv/bin/python main.py
+```
+
+На VPS (webhook, HTTPS от Caddy):
+
+```bash
+docker compose up -d --build      # см. DEPLOY.md
+docker compose logs -f bot
 ```
 
 В одном процессе поднимаются:
@@ -110,6 +125,36 @@ cp .env.example .env       # и заполните
 | Click | Сервис → «URL Prepare/Complete» (Merchant API) | `https://<домен>/click/webhook` |
 
 После регистрации проверьте: `curl https://<домен>/health` → `{"ok":true,…}`.
+
+## Деплой на свой VPS (Datapasa) — основной способ
+
+Свой сервер 1 vCPU / 1 GB RAM: бот в Docker, HTTPS через Caddy (сертификат
+Let's Encrypt выпускается сам), режим **вебхук**. Подробно — **[DEPLOY.md](DEPLOY.md)**,
+кратко:
+
+```bash
+# 1. DNS: A-запись bot.example.uz → IP VPS
+# 2. На сервере:
+curl -fsSL https://get.docker.com | sudo sh
+git clone https://github.com/9rf3/teppa-bot.git /opt/teppa-bot
+cd /opt/teppa-bot && cp .env.example .env && nano .env   # секреты + BOT_DOMAIN
+docker compose up -d --build
+# 3. Проверка:
+curl https://bot.example.uz/health        # {"ok":true,"mode":"webhook",…}
+# 4. Обновления:
+./scripts/deploy.sh
+```
+
+Что даёт этот вариант:
+
+* `BOT_DOMAIN` в `.env` → compose сам выставляет
+  `TELEGRAM_WEBHOOK_URL=https://<домен>`, Caddy получает сертификат;
+* ноль «спящих» минут в отличие от бесплатного Render — ответ мгновенный;
+* публичные адреса платёжек: `https://<домен>/payme/webhook`,
+  `https://<домен>/click/webhook`;
+* `restart: unless-stopped` + автозапуск Docker — после перезагрузки сервера
+  бот поднимается сам;
+* логи ограничены (`10m × 3`), SSD 16 GB не забьётся.
 
 ## Деплой на Render.com
 
