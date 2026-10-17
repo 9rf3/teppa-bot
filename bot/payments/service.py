@@ -10,9 +10,10 @@ import asyncio
 import logging
 from typing import Any
 
-from .. import keyboards, notify, runtime, texts
+from .. import keyboards, notify, receipt_check, runtime, texts
 from ..config import Settings
 from ..db import Supabase, SupabaseError
+from ..receipt_check import CheckResult
 from ..utils import (
     create_qr_token,
     hold_deadline,
@@ -33,6 +34,12 @@ class PaymentService:
         self.settings = settings
         # booking_id -> задача авто-подтверждения чека (через receipt_seconds).
         self._receipts: dict[str, asyncio.Task] = {}
+        # booking_id -> вердикт машинной проверки чека (bot/receipt_check.py).
+        self._checks: dict[str, CheckResult] = {}
+        # Хэши уже присланных фото — чтобы один чек не прикладывали дважды.
+        self._seen_hashes: set[str] = set()
+        # Подменяется в тестах: сигнатура как у receipt_check.analyze.
+        self.receipt_analyzer = receipt_check.analyze
 
     # ---------- Удержание места ----------
 
@@ -180,11 +187,12 @@ class PaymentService:
 
     # ---------- Перевод на карту ----------
 
-    async def request_card_payment(self, booking: dict[str, Any], chat_id: int) -> None:
-        """Покупатель выбрал перевод: кладём платёж в очередь подтверждения."""
+    async def request_card_payment(self, booking: dict[str, Any], chat_id: int,
+                                   provider: str = 'card') -> None:
+        """Покупатель начал платить (карта/Payme/Click): платёж в очередь подтверждения."""
         await self.db.save_payment(
             booking_id=str(booking['id']),
-            provider='card',
+            provider=provider,
             amount=int(booking.get('price') or 0),
             status='pending',
             external_id=f'tg:{chat_id}',
@@ -215,9 +223,10 @@ class PaymentService:
         """Оплата подтверждена (вручную или автоматически через 2 минуты) — билет уходит."""
         payment = await self.db.payment(booking_id)
         external = str((payment or {}).get('external_id') or '')
+        provider = str((payment or {}).get('provider') or 'card')
         ok = await self.mark_paid(
             booking_id,
-            provider='card',
+            provider=provider,
             external_id=external or None,
             note='Оплачено автоматически по чеку' if auto else 'Подтверждено администратором',
         )
@@ -276,14 +285,31 @@ class PaymentService:
 
     # ---------- Чек: пересылка в группу и авто-подтверждение ----------
 
-    async def register_receipt(self, booking_id: str, file_id: str, chat_id: int) -> str:
-        """Скриншот получен: фото в группу админов, ссылка на пост в payments, таймер.
+    async def register_receipt(self, booking_id: str, file_id: str, chat_id: int,
+                               provider: str = 'card') -> str:
+        """Скриншот получен: машинная проверка → фото в группу админов, таймер.
 
         Возвращает ссылку на пост в группе ('' — группа не настроена, чек ушёл в ЛС).
         """
         booking = await self.db.booking(booking_id)
         booking = booking or {}
         passenger = f"{booking.get('first_name') or ''} {booking.get('last_name') or ''}".strip()
+
+        # Машинная проверка (bot/receipt_check.py): фото, дубликат, сумма, дата.
+        # Пока фото скачивается и разбирается — покупатель ещё ничего не знает.
+        photo = await self._download_receipt(file_id)
+        if len(self._seen_hashes) > 2000:  # память: старые хэши просто забываем
+            self._seen_hashes.clear()
+        result = await asyncio.to_thread(
+            self.receipt_analyzer,
+            photo,
+            expected_amount=int(booking.get('price') or 0),
+            seen=self._seen_hashes,
+        )
+        self._checks[booking_id] = result
+        log.info('чек %s: автопроверка — %s (%s)', booking_id, result.verdict,
+                 '; '.join(result.reasons) or '; '.join(result.checked) or 'без деталей')
+
         caption = texts.RECEIPT_GROUP_CAPTION.format(
             booking=booking_id,
             title=booking.get('trip_title') or booking.get('direction') or 'Поездка',
@@ -291,13 +317,13 @@ class PaymentService:
             amount=money(int(booking.get('price') or 0)),
             passenger=passenger or '—',
             phone=booking.get('phone') or '—',
-        )
+        ) + '\n\n' + receipt_check.describe(result)
         link = await self._post_receipt(file_id, caption, keyboards.receipt_actions(booking_id))
 
         runtime.remember_chat(booking_id, chat_id)
         await self.db.save_payment(
             booking_id=booking_id,
-            provider='card',
+            provider=provider,
             amount=int(booking.get('price') or 0),
             status='pending',
             external_id=f'tg:{chat_id}',
@@ -306,6 +332,22 @@ class PaymentService:
         )
         self.schedule_receipt_check(booking_id)
         return link
+
+    async def _download_receipt(self, file_id: str) -> bytes | None:
+        """Скачивает фото чека с серверов Telegram (None — не скачалось)."""
+        bot = runtime.bot
+        if not bot:
+            return None
+        try:
+            file = await bot.get_file(file_id)
+            data = await bot.download_file(file.file_path)
+            if data is None:
+                return None
+            raw = data.getvalue() if hasattr(data, 'getvalue') else bytes(data)
+            return raw or None
+        except Exception:  # noqa: BLE001
+            log.exception('фото чека не скачалось: %s', file_id)
+            return None
 
     async def _post_receipt(self, file_id: str, caption: str, markup) -> str:
         """Фото чека → группа админов; если не вышло — в ЛС админам. Ссылка на пост."""
@@ -357,13 +399,22 @@ class PaymentService:
             log.exception('авто-подтверждение чека не отработало: %s', booking_id)
 
     async def auto_accept_receipt(self, booking_id: str) -> bool:
-        """Прошло 2 минуты и никто не отклонил — принимаем оплату, шлём билет."""
+        """Прошло 2 минуты, никто не отклонил и автопроверка не нашла проблем —
+        принимаем оплату, шлём билет. Сомнительный чек ждёт админа."""
         payment = await self.db.payment(booking_id)
         if not payment or payment.get('status') != 'pending' \
                 or payment.get('error_code') != 'receipt':
             return False
         booking = await self.db.booking(booking_id)
         if not booking or booking.get('status') != 'Новая':
+            return False
+        verdict = self._checks.get(booking_id)
+        if verdict is not None and not verdict.auto_accept:
+            log.warning('чек %s не принят автоматически: %s', booking_id,
+                        '; '.join(verdict.reasons))
+            await notify.notify_admins(
+                f'⚠️ Чек {booking_id} не прошёл автопроверку — ждёт вашего решения в группе.'
+            )
             return False
         return await self.approve_card(booking_id, auto=True)
 
@@ -410,7 +461,8 @@ class PaymentService:
             return 'expired', booking
 
         payment = await self.db.payment(booking_id)
-        if payment and payment.get('provider') == 'card' and payment.get('status') == 'pending':
+        if payment and payment.get('status') == 'pending' \
+                and payment.get('error_code') == 'receipt':
             return 'waiting_card', booking
 
         deadline = hold_deadline(str(booking.get('created_at') or ''), self.settings.hold_minutes)

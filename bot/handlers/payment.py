@@ -11,13 +11,14 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import keyboards, notify, runtime, texts
 from ..db import SupabaseError
-from ..payments import click as click_api
-from ..payments import payme as payme_api
 from ..utils import fmt_date, money
 
 log = logging.getLogger('teppa.payment')
 
 router = Router()
+
+# Подписи способов для текста «пришлите скриншот чека».
+_METHOD_LABELS = {'payme': 'Payme', 'click': 'Click'}
 
 
 class Card(StatesGroup):
@@ -77,14 +78,14 @@ async def send_menu(message: Message, booking_id: str) -> None:
     runtime.remember_chat(booking_id, message.chat.id)
     runtime.payments.start_hold(booking)
 
-    settings = runtime.settings
     await message.answer(
         _menu_text(booking, trip),
+        # Payme и Click пока тоже работают по чеку (скриншоту) — кнопки видны всегда.
         reply_markup=keyboards.payment_methods(
             booking_id,
-            payme=settings.payme_ready,
-            click=settings.click_ready,
-            card=settings.card_ready,
+            payme=True,
+            click=True,
+            card=runtime.settings.card_ready,
         ),
     )
 
@@ -102,8 +103,8 @@ async def _edit_menu(message: Message, booking_id: str) -> None:
     text = _menu_text(booking, trip)
     kb = keyboards.payment_methods(
         booking_id,
-        payme=settings.payme_ready,
-        click=settings.click_ready,
+        payme=True,
+        click=True,
         card=settings.card_ready,
     )
     try:
@@ -141,62 +142,37 @@ async def on_pay(callback: CallbackQuery, state: FSMContext) -> None:
 
     settings = runtime.settings
     amount = int(booking.get('price') or 0)
-    return_url = f"{settings.site_url}/hold?b={booking_id}" if settings.site_url else ''
 
-    if method == 'payme':
-        if not settings.payme_ready:
-            await callback.answer('Payme пока недоступен, выберите другой способ.', show_alert=True)
-            return
-        link = payme_api.build_checkout_url(
-            merchant_id=settings.payme_merchant_id,
-            booking_id=booking_id,
-            amount_uzs=amount,
-            return_url=return_url,
-            test=settings.payme_test,
-        )
-        await callback.answer('Откройте Payme по ссылке или QR-коду')
-        await callback.message.answer(texts.PAY_PAYME_TEXT.format(link=link),
-                                      reply_markup=keyboards.back_to_booking(booking_id))
-        try:
-            await callback.message.answer_photo(
-                notify.qr_png(link), caption='QR для оплаты Payme'
-            )
-        except Exception:  # noqa: BLE001
-            log.exception('QR для Payme не отправился')
-        return
-
-    if method == 'click':
-        if not settings.click_ready:
-            await callback.answer('Click пока недоступен, выберите другой способ.', show_alert=True)
-            return
-        link = click_api.build_link(
-            service_id=settings.click_service_id,
-            merchant_id=settings.click_merchant_id,
-            booking_id=booking_id,
-            amount_uzs=amount,
-            return_url=return_url,
-        )
-        await callback.answer('Откройте ссылку на оплату')
-        await callback.message.answer(texts.PAY_CLICK_TEXT.format(link=link),
-                                      reply_markup=keyboards.back_to_booking(booking_id))
-        return
-
-    if method == 'card':
+    # Payme / Click / карта — пока все три платят чеком (скриншотом):
+    # покупатель переводит сумму и присылает фото чека, дальше автопроверка
+    # и 2 минуты на подтверждение. Платёжный API (код сборки ссылок) остаётся
+    # в bot/payments/payme.py и bot/payments/click.py — подключим позже.
+    if method in ('payme', 'click', 'card'):
         if not settings.card_ready:
-            await callback.answer('Перевод пока недоступен.', show_alert=True)
+            await callback.answer('Оплата временно недоступна, выберите позже.', show_alert=True)
             return
-        await runtime.payments.request_card_payment(booking, callback.message.chat.id)
+        await runtime.payments.request_card_payment(
+            booking, callback.message.chat.id, provider=method,
+        )
         await state.set_state(Card.receipt)
-        await state.update_data(booking_id=booking_id)
+        await state.update_data(booking_id=booking_id, provider=method)
         await callback.answer('Ждём чек')
-        await callback.message.answer(
+        label = _METHOD_LABELS.get(method)
+        text = (
+            texts.PAY_RECEIPT_TEXT.format(
+                method=label,
+                amount=money(amount),
+                number=settings.card_number,
+                holder=settings.card_holder,
+            )
+            if label else
             texts.PAY_CARD_TEXT.format(
                 amount=money(amount),
                 number=settings.card_number,
                 holder=settings.card_holder,
-            ),
-            reply_markup=keyboards.back_to_booking(booking_id),
+            )
         )
+        await callback.message.answer(text, reply_markup=keyboards.back_to_booking(booking_id))
         return
 
     await callback.answer('Неизвестный способ оплаты', show_alert=True)
@@ -209,17 +185,20 @@ async def on_pay(callback: CallbackQuery, state: FSMContext) -> None:
 async def on_receipt(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     booking_id = str(data.get('booking_id') or '')
+    provider = str(data.get('provider') or 'card')
     await state.clear()
     if not booking_id:
         await message.answer(texts.NO_BOOKING)
         return
 
     file_id = message.photo[-1].file_id
-    # Отвечаем сразу: дальше чек уходит в группу админов и стартует таймер проверки.
+    # Отвечаем сразу: дальше чек уходит в автопроверку, в группу админов
+    # и стартует таймер (2 минуты) — о результате бот напишет сам.
     await message.answer(texts.PAY_CARD_WAITING, reply_markup=keyboards.main_menu())
 
     try:
-        await runtime.payments.register_receipt(booking_id, file_id, message.chat.id)
+        await runtime.payments.register_receipt(booking_id, file_id, message.chat.id,
+                                                provider=provider)
     except SupabaseError:
         log.exception('чек не сохранился: %s', booking_id)
         await notify.notify_admins(

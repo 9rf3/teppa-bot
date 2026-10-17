@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from aiogram import Bot, Dispatcher  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
-from aiogram.types import Chat, Message, Update  # noqa: E402
+from aiogram.types import Chat, File, Message, Update  # noqa: E402
 from aiogram.client.default import DefaultBotProperties  # noqa: E402
 
 from bot import runtime  # noqa: E402
@@ -55,6 +55,10 @@ def _response_for(method):
             text=getattr(method, 'text', None),
             caption=getattr(method, 'caption', None),
         )
+    if getattr(returning, '__name__', '') == 'File':
+        # getFile — чтобы скачивание чека доходило до заглушки stream_content
+        # (там отдаётся b'' → фото «не скачалось», вердикт unknown).
+        return File(file_id='test', file_unique_id='uniq', file_path='photos/test.jpg')
     try:
         return returning()
     except Exception:  # noqa: BLE001
@@ -317,16 +321,24 @@ async def run() -> None:
         out = await send(callback_update('lunch:1'), 'К оплате: 350 990 сум')
         assert 'Подтвердить и оплатить' in out, out
 
-        # 10. подтверждение → бронь и меню оплаты
-        await send(callback_update('bk:ok'), 'Осталось оплатить')
+        # 10. подтверждение → бронь и меню оплаты (все три кнопки видны)
+        out = await send(callback_update('bk:ok'), 'Осталось оплатить')
+        assert 'Payme' in out and 'Click' in out, out
         assert len(db.bookings) == 1, db.bookings
         booking = next(iter(db.bookings.values()))
         assert booking['status'] == 'Новая' and booking['price'] == 350990, booking
         assert booking['phone'] == '+998901234567', booking
 
+        # 10а. кнопка Payme — тоже чеком (скриншотом), платёж помечен провайдером
+        out = await send(callback_update(f"pay:{booking['id']}:payme"),
+                         'Пришлите сюда скриншот чека')
+        assert 'Payme' in out, out
+        assert db.payments[booking['id']]['provider'] == 'payme', db.payments
+
         # 11. перевод на карту
         await send(callback_update(f"pay:{booking['id']}:card"), 'Пришлите сюда скриншот чека')
         assert db.payments[booking['id']]['status'] == 'pending', db.payments
+        assert db.payments[booking['id']]['provider'] == 'card', db.payments
 
         # 12. чек ушёл админу (группа не настроена — ЛС), покупатель ждёт ~2 минуты
         await send(photo_update(), 'Чек получен')

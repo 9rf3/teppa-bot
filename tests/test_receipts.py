@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from bot import runtime  # noqa: E402
 from bot.payments.service import PaymentService  # noqa: E402
+from bot.receipt_check import CheckResult  # noqa: E402
 from bot.server import create_app  # noqa: E402
 from tests.test_flows import USER_ID, FakeDb, FakeSession, settings  # noqa: E402
 
@@ -140,6 +141,45 @@ async def test_reject_frees_seat() -> None:
         await runtime.shutdown()
 
 
+async def test_suspect_receipt_waits_for_admin() -> None:
+    """Автопроверка нашла проблему: через 2 минуты чек НЕ принимается сам, ждёт админа."""
+    cfg = group_settings()
+    db = FakeDb()
+    service = PaymentService(db, cfg)
+    bot = Bot(token='42:TEST', session=FakeSession(),
+              default=DefaultBotProperties(parse_mode=None))
+    runtime.bind(bot, cfg, db, service)
+    try:
+        booking = await make_booking(db, seat=9)
+        await service.request_card_payment(booking, USER_ID)
+
+        # Авто-сказала: сумма не совпала (подменяем анализатор, OCR в тестах не гоняем).
+        service.receipt_analyzer = lambda photo, **kw: CheckResult(
+            verdict='suspect', reasons=['сумма в чеке 100 000 не совпадает с 350 990'],
+        )
+        await service.register_receipt(booking['id'], 'f-suspect', USER_ID)
+
+        # 1. в посте админам — предупреждение автопроверки
+        photos = to_chat(bot, 'SendPhoto', GROUP_ID)
+        assert photos, 'чек не ушёл в группу'
+        caption = photos[-1].caption or ''
+        assert '⚠️ Автопроверка' in caption and 'вручную' in caption, caption
+
+        # 2. прошло 2 минуты — авто-принятия нет, бронь ждёт админа
+        await asyncio.sleep(1.3)
+        booking_row = await db.booking(booking['id'])
+        assert booking_row['status'] == 'Новая', booking_row
+        payment = await db.payment(booking['id'])
+        assert payment['status'] == 'pending', payment
+
+        # 3. админ подтвердил вручную — оплата проходит
+        assert await service.approve_card(booking['id']) is True
+        assert db.bookings[booking['id']]['status'] == 'Оплачена'
+        print('ok: сомнительный чек не принимается автоматически — ждёт админа')
+    finally:
+        await runtime.shutdown()
+
+
 def test_internal_endpoints() -> None:
     """Админка сайта: /internal/approve и /internal/reject под секретом."""
     cfg = group_settings()
@@ -200,8 +240,9 @@ def test_internal_endpoints() -> None:
 def main() -> None:
     asyncio.run(test_group_receipt_and_auto_approve())
     asyncio.run(test_reject_frees_seat())
+    asyncio.run(test_suspect_receipt_waits_for_admin())
     test_internal_endpoints()
-    print('\n3 сценария чека — прошли')
+    print('\n4 сценария чека — прошли')
 
 
 if __name__ == '__main__':

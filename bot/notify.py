@@ -48,7 +48,7 @@ def ticket_text(booking: dict[str, Any], trip: dict[str, Any] | None = None) -> 
 
 async def send_ticket(bot: Bot, chat_id: int, booking: dict[str, Any],
                       trip: dict[str, Any] | None = None) -> None:
-    """Билет: сообщение + QR-фото. Падения почты не должны ронять оплату."""
+    """Билет: сообщение + QR-фото + PDF-файл. Падения почты не должны ронять оплату."""
     try:
         await bot.send_message(chat_id, ticket_text(booking, trip))
     except Exception:  # noqa: BLE001
@@ -67,6 +67,19 @@ async def send_ticket(bot: Bot, chat_id: int, booking: dict[str, Any],
         )
     except Exception:  # noqa: BLE001
         log.exception('не удалось отправить QR chat=%s', chat_id)
+
+    # PDF-билет (тот же дизайн, что «Скачать билет в PDF» на сайте).
+    try:
+        from . import ticket_pdf  # noqa: PLC0415 — лениво, reportlab тяжёлый
+
+        data = ticket_pdf.build_ticket_pdf(booking, trip)
+        await bot.send_document(
+            chat_id,
+            BufferedInputFile(data, filename=f"ticket-{booking.get('id') or 'teppa'}.pdf"),
+            caption=texts.TICKET_PDF_CAPTION,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception('не удалось отправить PDF chat=%s', chat_id)
 
 
 async def _chat_from_payment(booking_id: str) -> int | None:

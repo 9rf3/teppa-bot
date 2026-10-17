@@ -15,6 +15,11 @@ RUN addgroup --system app && adduser --system --ingroup app app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# tesseract — машинная проверка чеков (bot/receipt_check.py); ru+eng для OCR.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-ru \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY main.py .
 COPY bot/ ./bot/
 
