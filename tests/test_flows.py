@@ -321,15 +321,17 @@ async def run() -> None:
         out = await send(callback_update('lunch:1'), 'К оплате: 350 990 сум')
         assert 'Подтвердить и оплатить' in out, out
 
-        # 10. подтверждение → бронь и меню оплаты (все три кнопки видны)
+        # 10. подтверждение → бронь и меню оплаты (Payme/Click скрыты, карта видна)
         out = await send(callback_update('bk:ok'), 'Осталось оплатить')
-        assert 'Payme' in out and 'Click' in out, out
+        assert 'Payme' not in out and 'Click' not in out, out   # кнопки скрыты
+        assert 'Перевод на карту' in out or 'карту' in out, out
         assert len(db.bookings) == 1, db.bookings
         booking = next(iter(db.bookings.values()))
         assert booking['status'] == 'Новая' and booking['price'] == 350990, booking
         assert booking['phone'] == '+998901234567', booking
 
-        # 10а. кнопка Payme — тоже чеком (скриншотом), платёж помечен провайдером
+        # 10а. кнопка Payme скрыта, но обработчик сохранён: коллбэк работает,
+        # платёж помечен провайдером (кнопку вернём вместе с платёжным API)
         out = await send(callback_update(f"pay:{booking['id']}:payme"),
                          'Пришлите сюда скриншот чека')
         assert 'Payme' in out, out

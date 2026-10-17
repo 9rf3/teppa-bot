@@ -36,6 +36,9 @@ class PaymentService:
         self._receipts: dict[str, asyncio.Task] = {}
         # booking_id -> вердикт машинной проверки чека (bot/receipt_check.py).
         self._checks: dict[str, CheckResult] = {}
+        # booking_id -> file_id фото чека: понадобится, если авто-принятие
+        # не сработает — перешлём админам в ЛС вместе с текстом.
+        self._receipt_files: dict[str, str] = {}
         # Хэши уже присланных фото — чтобы один чек не прикладывали дважды.
         self._seen_hashes: set[str] = set()
         # Подменяется в тестах: сигнатура как у receipt_check.analyze.
@@ -231,6 +234,8 @@ class PaymentService:
             note='Оплачено автоматически по чеку' if auto else 'Подтверждено администратором',
         )
         if ok:
+            self._checks.pop(booking_id, None)
+            self._receipt_files.pop(booking_id, None)
             await notify.notify_user(booking_id, texts.PAID_BADGE)
             await self._edit_receipt_post(
                 payment,
@@ -266,6 +271,8 @@ class PaymentService:
 
         self.cancel_receipt_check(booking_id)
         runtime.cancel_hold_task(booking_id)
+        self._checks.pop(booking_id, None)
+        self._receipt_files.pop(booking_id, None)
 
         await notify.notify_user(booking_id, texts.PAY_REJECTED, keyboards.main_menu())
 
@@ -307,6 +314,7 @@ class PaymentService:
             seen=self._seen_hashes,
         )
         self._checks[booking_id] = result
+        self._receipt_files[booking_id] = file_id
         log.info('чек %s: автопроверка — %s (%s)', booking_id, result.verdict,
                  '; '.join(result.reasons) or '; '.join(result.checked) or 'без деталей')
 
@@ -387,6 +395,8 @@ class PaymentService:
             if not task.done():
                 task.cancel()
         self._receipts.clear()
+        self._checks.clear()
+        self._receipt_files.clear()
 
     async def _receipt_watch(self, booking_id: str, delay: float) -> None:
         try:
@@ -412,11 +422,42 @@ class PaymentService:
         if verdict is not None and not verdict.auto_accept:
             log.warning('чек %s не принят автоматически: %s', booking_id,
                         '; '.join(verdict.reasons))
-            await notify.notify_admins(
-                f'⚠️ Чек {booking_id} не прошёл автопроверку — ждёт вашего решения в группе.'
-            )
+            await self._notify_manual_review(booking_id, verdict)
             return False
         return await self.approve_card(booking_id, auto=True)
+
+    async def _notify_manual_review(self, booking_id: str, verdict: CheckResult) -> None:
+        """Автопроверка не пройдена: предупреждение в группу, админам в ЛС —
+        фото чека с кнопками, покупателю — «ждите администратора»."""
+        reasons = '; '.join(verdict.reasons) or 'автопроверка не пройдена'
+        bot = runtime.bot
+
+        # 1. Группа админов — сюда же сбежались чеки и кнопки ✅/❌.
+        group = self.settings.admin_group_id
+        if bot and group:
+            try:
+                await bot.send_message(
+                    group, texts.GROUP_MANUAL_WAIT.format(booking=booking_id, reasons=reasons)
+                )
+            except Exception:  # noqa: BLE001
+                log.exception('предупреждение не ушло в группу %s', group)
+
+        # 2. Админам в личку бота — чтобы можно было проверить, не открывая группу.
+        caption = texts.ADMIN_RECEIPT_NOT_APPROVED.format(booking=booking_id, reasons=reasons)
+        file_id = self._receipt_files.get(booking_id)
+        markup = keyboards.receipt_actions(booking_id)
+        if bot and file_id:
+            for admin_id in self.settings.admin_ids:
+                try:
+                    await bot.send_photo(admin_id, file_id, caption=caption,
+                                         reply_markup=markup)
+                except Exception:  # noqa: BLE001
+                    log.exception('чек не переслался админу %s', admin_id)
+        else:
+            await notify.notify_admins(caption, reply_markup=markup)
+
+        # 3. Покупателю — чек не подтверждён автоматически, ждём человека.
+        await notify.notify_user(booking_id, texts.PAY_MANUAL_WAIT)
 
     async def resume_receipt_checks(self) -> None:
         """После рестарта: дожидаемся остатка таймера, просроченные — сразу принимаем."""

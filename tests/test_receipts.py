@@ -29,7 +29,7 @@ from bot import runtime  # noqa: E402
 from bot.payments.service import PaymentService  # noqa: E402
 from bot.receipt_check import CheckResult  # noqa: E402
 from bot.server import create_app  # noqa: E402
-from tests.test_flows import USER_ID, FakeDb, FakeSession, settings  # noqa: E402
+from tests.test_flows import USER_ID, FakeDb, FakeSession, markup_text, settings  # noqa: E402
 
 GROUP_ID = -100777555  # тестовая группа админов
 INTERNAL_SECRET = 'int-secret-test'
@@ -165,12 +165,28 @@ async def test_suspect_receipt_waits_for_admin() -> None:
         caption = photos[-1].caption or ''
         assert '⚠️ Автопроверка' in caption and 'вручную' in caption, caption
 
-        # 2. прошло 2 минуты — авто-принятия нет, бронь ждёт админа
+        # 2. прошло 2 минуты — авто-принятия нет, бронь ждёт админа,
+        #    а уведомления ушли по назначению: группа / админам в ЛС / покупателю
         await asyncio.sleep(1.3)
         booking_row = await db.booking(booking['id'])
         assert booking_row['status'] == 'Новая', booking_row
         payment = await db.payment(booking['id'])
         assert payment['status'] == 'pending', payment
+
+        # предупреждение — в ГРУППУ (не в личку)
+        group_msgs = to_chat(bot, 'SendMessage', GROUP_ID)
+        assert any('автопроверка чека не пройдена' in (m.text or '') for m in group_msgs), \
+            [getattr(m, 'text', None) for m in group_msgs]
+        # админам в ЛС бота — «не подтверждён» + фото чека + кнопки ✅/❌
+        admin_photos = to_chat(bot, 'SendPhoto', USER_ID)
+        assert admin_photos, 'админам в ЛС не пришло фото чека'
+        caption = admin_photos[-1].caption or ''
+        assert 'не подтверждён автоматически' in caption and 'сумма' in caption, caption
+        labels = markup_text(admin_photos[-1])
+        assert 'Подтвердить' in labels and 'Отклонить' in labels, labels  # кнопки ✅/❌
+        # покупателю — «ждите администратора»
+        user_text = ' | '.join(m.text or '' for m in to_chat(bot, 'SendMessage', USER_ID))
+        assert 'автоматически не подтверждён' in user_text, user_text
 
         # 3. админ подтвердил вручную — оплата проходит
         assert await service.approve_card(booking['id']) is True

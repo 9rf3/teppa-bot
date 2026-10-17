@@ -80,11 +80,12 @@ async def send_menu(message: Message, booking_id: str) -> None:
 
     await message.answer(
         _menu_text(booking, trip),
-        # Payme и Click пока тоже работают по чеку (скриншоту) — кнопки видны всегда.
+        # Payme/Click пока скрыты (кнопки вернутся, когда подключим их платёжный
+        # API) — сами способы оплаты сохранены: on_pay и _METHOD_LABELS ждут.
         reply_markup=keyboards.payment_methods(
             booking_id,
-            payme=True,
-            click=True,
+            payme=False,
+            click=False,
             card=runtime.settings.card_ready,
         ),
     )
@@ -103,8 +104,8 @@ async def _edit_menu(message: Message, booking_id: str) -> None:
     text = _menu_text(booking, trip)
     kb = keyboards.payment_methods(
         booking_id,
-        payme=True,
-        click=True,
+        payme=False,   # вернём True, когда подключим Merchant API / SHOP API
+        click=False,
         card=settings.card_ready,
     )
     try:
