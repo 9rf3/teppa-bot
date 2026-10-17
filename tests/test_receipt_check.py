@@ -19,10 +19,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PIL import Image, ImageDraw  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from bot import receipt_check as rc  # noqa: E402
 from bot.ticket_pdf import build_ticket_pdf  # noqa: E402
+
+# Шрифт, который tesseract точно разбирает (в т.ч. кириллицу).
+_FONT_CANDIDATES = (
+    '/System/Library/Fonts/Supplemental/Arial.ttf',           # macOS
+    '/Library/Fonts/Arial.ttf',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',        # Linux
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+)
+
+
+def _font(size: int = 46) -> ImageFont.ImageFont:
+    for path in _FONT_CANDIDATES:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+    try:
+        return ImageFont.load_default(size=size)  # Pillow ≥ 10.1 — векторный
+    except TypeError:  # pragma: no cover
+        return ImageFont.load_default()
 
 
 def jpeg(image: Image.Image, quality: int = 92) -> bytes:
@@ -31,18 +49,34 @@ def jpeg(image: Image.Image, quality: int = 92) -> bytes:
     return buffer.getvalue()
 
 
-def screenshot() -> bytes:
-    """Скриншот приложения: тёмная шапка, строки — как настоящий чек в телефоне."""
-    image = Image.new('RGB', (720, 1280), (245, 247, 243))
+def render_receipt(amount: str, when: str) -> bytes:
+    """Скриншот чека: читается и человеком, и OCR (сумма, дата, слова о переводе)."""
+    image = Image.new('RGB', (900, 1400), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    draw.rectangle([0, 0, 720, 170], fill=(21, 32, 25))
-    draw.text((40, 60), 'Payme', fill=(185, 239, 82))
-    draw.text((40, 230), 'Перевод', fill=(21, 32, 25))
-    draw.text((40, 270), '350 990 сум', fill=(21, 32, 25))
-    draw.text((40, 310), '17.10.2026', fill=(21, 32, 25))
-    for row in range(400, 1150, 70):
-        draw.rectangle([30, row, 690, row + 46], fill=(230, 233, 228), outline=(170, 176, 168))
-    return jpeg(image)
+    font = _font()
+    draw.rectangle([0, 0, 900, 170], fill=(21, 32, 25))
+    draw.text((40, 55), 'Payme', font=font, fill=(185, 239, 82))
+    draw.text((60, 320), 'Перевод получен', font=font, fill=(21, 32, 25))
+    draw.text((60, 420), amount, font=font, fill=(21, 32, 25))
+    draw.text((60, 520), f'{when} 13:10', font=font, fill=(21, 32, 25))
+    draw.text((60, 620), 'Получатель: TEPPA', font=font, fill=(21, 32, 25))
+    for row in range(720, 1350, 90):
+        draw.rectangle([40, row, 860, row + 60], fill=(236, 238, 234), outline=(170, 176, 168))
+    return jpeg(image, quality=95)
+
+
+def screenshot() -> bytes:
+    """Обычный скриншот приложения — тёмная шапка, строки (для проверки картинки)."""
+    return render_receipt('350 990 сум', date.today().strftime('%d.%m.%Y'))
+
+
+def ocr_available() -> bool:
+    try:
+        import pytesseract  # noqa: PLC0415
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def test_image_checks() -> None:
@@ -89,6 +123,28 @@ def test_describe() -> None:
     print('ok: describe() — три формы строки для группы админов')
 
 
+def test_ocr_sum_and_date() -> None:
+    """Если tesseract установлен: чужая сумма и старая дата ловятся, своя — ок."""
+    if not ocr_available():
+        print('skip: tesseract не установлен — OCR-часть пропущена (поставьте: brew install tesseract tesseract-lang)')
+        return
+    today = date.today().strftime('%d.%m.%Y')
+
+    ok = rc.analyze(render_receipt('350 990 сум', today), expected_amount=350990, seen=set())
+    assert ok.verdict == rc.OK, (ok.reasons, ok.checked)
+    assert ok.amount_found == 350990, ok.amount_found
+    assert ok.date_found, ok.date_found
+    assert any('сумма' in line for line in ok.checked), ok.checked
+
+    wrong = rc.analyze(render_receipt('100 000 сум', today), expected_amount=350990, seen=set())
+    assert wrong.verdict == rc.SUSPECT and 'не совпадает' in wrong.reasons[0], wrong
+
+    old = (date.today() - timedelta(days=7)).strftime('%d.%m.%Y')
+    stale = rc.analyze(render_receipt('350 990 сум', old), expected_amount=350990, seen=set())
+    assert stale.verdict == rc.SUSPECT and 'не из последних двух дней' in stale.reasons[0], stale
+    print('ok: OCR сверяет сумму и дату — чужая сумма и старая дата дают suspect')
+
+
 def test_ticket_pdf() -> None:
     booking = {
         'id': 'BLD-220800140', 'trip_id': 't1', 'trip_title': 'Amirsoy Day',
@@ -114,8 +170,9 @@ def main() -> None:
     test_image_checks()
     test_duplicate_and_unknown()
     test_describe()
+    test_ocr_sum_and_date()
     test_ticket_pdf()
-    print('\n4 проверки чека и PDF — прошли')
+    print('\n5 проверок чека и PDF — прошли')
 
 
 if __name__ == '__main__':

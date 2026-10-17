@@ -43,8 +43,8 @@ _MONTHS = {
 # Слова, которые есть в настоящем чеке перевода.
 _PAYMENT_WORDS = (
     'перевод', 'переведён', 'переведен', 'оплат', 'успешн', 'транзакц', 'комисси',
-    'получател', 'сумм', 'payme', 'paycom', 'click', 'uzcard', 'humo',
-    'payment', 'paid', 'completed', 'transaction', 'transfer', 'uzs',
+    'получател', 'сумм', 'сум ', 'payme', 'paycom', 'click', 'uzcard', 'humo',
+    'payment', 'paid', 'completed', 'transaction', 'transfer', 'uzs', 'sum ',
 )
 
 _AMOUNT_RE = re.compile(r'\d[\d\s\u00a0]{2,24}\d')
@@ -173,6 +173,33 @@ def _digits_number(raw: str) -> int | None:
     return int(digits)
 
 
+def _labeled_amounts(text: str) -> list[int]:
+    """Числа рядом со словом «сумма / sum / uzs» — вот настоящая сумма чека.
+
+    Без такой привязки число может быть остатком на счёте или телефоном,
+    поэтому как «сумма чека» его не берём.
+    """
+    lowered = text.lower()
+    found: list[int] = []
+    for label in ('сумм', 'сум', 'sum', 'uzs'):
+        start = 0
+        while True:
+            pos = lowered.find(label, start)
+            if pos < 0:
+                break
+            window = text[max(0, pos - 40):pos + len(label) + 40]
+            for match in _AMOUNT_RE.finditer(window):
+                number = _digits_number(match.group(0))
+                if number is not None:
+                    found.append(number)
+            start = pos + len(label)
+    unique: list[int] = []
+    for number in found:
+        if number not in unique:
+            unique.append(number)
+    return unique
+
+
 def _find_date(text: str) -> datetime | None:
     for match in _DATE_NUMERIC_RE.finditer(text):
         try:
@@ -203,14 +230,25 @@ def _find_date(text: str) -> datetime | None:
 def _check_text(text: str, expected_amount: int | None, result: CheckResult) -> None:
     lowered = text.lower()
 
-    # Сумма: ищем число, похожее на сумму брони.
+    # Сумма: сначала число рядом с «сумма/sum/uzs» — это и есть сумма чека;
+    # если такой привязки нет, берем точное совпадение где угодно.
     candidates = [n for n in (_digits_number(m.group(0)) for m in _AMOUNT_RE.finditer(text))
                   if n is not None]
+    labeled = _labeled_amounts(text)
     if expected_amount:
-        exact = [c for c in candidates if abs(c - expected_amount) <= max(1000, expected_amount // 100)]
-        if exact:
-            result.amount_found = exact[0]
-            result.checked.append(f'сумма {exact[0]:,} совпала'.replace(',', ' '))
+        tolerance = max(1000, expected_amount // 100)
+        exact = next((c for c in labeled if abs(c - expected_amount) <= tolerance), None)
+        if exact is None:
+            exact = next((c for c in candidates if abs(c - expected_amount) <= tolerance), None)
+        if exact is not None:
+            result.amount_found = exact
+            result.checked.append(f'сумма {exact:,} совпала'.replace(',', ' '))
+        elif labeled:
+            # Рядом с «суммой» стоит другое число — чек не на эту сумму.
+            result.amount_found = labeled[0]
+            result.reasons.append(
+                f'сумма в чеке {labeled[0]:,} не совпадает с {expected_amount:,}'.replace(',', ' ')
+            )
         else:
             near = [c for c in candidates if expected_amount * 0.5 <= c <= expected_amount * 1.5]
             if near:
@@ -234,5 +272,6 @@ def _check_text(text: str, expected_amount: int | None, result: CheckResult) -> 
     # Текст вообще похож на чек перевода?
     if any(word in lowered for word in _PAYMENT_WORDS):
         result.checked.append('в чеке найдены слова о переводе')
-    elif lowered.strip():
+    elif lowered.strip() and result.amount_found is None:
+        # Ни суммы, ни слов об оплате — похоже, что OCR разобрал не чек.
         result.reasons.append('в чеке не нашлось ни слов об оплате, ни суммы')
